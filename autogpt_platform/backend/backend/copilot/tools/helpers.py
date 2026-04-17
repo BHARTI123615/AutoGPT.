@@ -263,11 +263,25 @@ async def execute_block(
                     },
                 )
 
+        # Process binary outputs: detect embedded base64, save to workspace,
+        # replace with workspace:// references to reduce LLM token usage.
+        from backend.copilot.tools.binary_output_processor import process_binary_outputs
+        from backend.util.workspace import WorkspaceManager
+
+        workspace_manager = WorkspaceManager(
+            user_id=user_id,
+            workspace_id=workspace.id,
+            session_id=session_id,
+        )
+        processed_outputs = await process_binary_outputs(
+            dict(outputs), workspace_manager, block.name
+        )
+
         return BlockOutputResponse(
             message=f"Block '{block.name}' executed successfully",
             block_id=block_id,
             block_name=block.name,
-            outputs=dict(outputs),
+            outputs=processed_outputs,
             success=True,
             session_id=session_id,
         )
