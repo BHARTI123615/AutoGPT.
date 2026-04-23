@@ -57,8 +57,15 @@ class ConnectIntegrationTool(BaseTool):
     def description(self) -> str:
         return (
             "Prompt the user to connect a required integration (e.g. GitHub). "
-            "Call this when an external CLI or API call fails because the user "
-            "has not connected the relevant account. "
+            "Call this ONLY when an external CLI or API call in the sandbox "
+            "fails because the user has not connected the relevant account. "
+            "Do NOT call this for agent block credential issues — `run_agent` "
+            "automatically detects and prompts for the correct provider based "
+            "on the agent's graph metadata. Using this tool for agent blocks "
+            "risks requesting the WRONG provider. "
+            "The `provider` parameter must match what the failing CLI/API "
+            "actually needs (e.g. 'google' for Gmail/Google APIs, 'github' "
+            "for GitHub CLI). Double-check before calling. "
             "The tool surfaces a credentials setup card in the chat so the user "
             "can authenticate without leaving the page. "
             "After the user connects the account, retry the operation. "
