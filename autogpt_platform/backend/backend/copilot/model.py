@@ -63,6 +63,7 @@ class ChatSessionMetadata(BaseModel):
 
 
 class ChatMessage(BaseModel):
+    id: str | None = None
     role: str
     content: str | None = None
     name: str | None = None
@@ -78,6 +79,7 @@ class ChatMessage(BaseModel):
     def from_db(prisma_message: PrismaChatMessage) -> "ChatMessage":
         """Convert a Prisma ChatMessage to a Pydantic ChatMessage."""
         return ChatMessage(
+            id=prisma_message.id,
             role=prisma_message.role,
             content=prisma_message.content,
             name=prisma_message.name,
@@ -697,6 +699,7 @@ async def _save_session_to_db(
         for msg in new_messages:
             messages_data.append(
                 {
+                    "id": msg.id,
                     "role": msg.role,
                     "content": msg.content,
                     "name": msg.name,
@@ -704,6 +707,7 @@ async def _save_session_to_db(
                     "refusal": msg.refusal,
                     "tool_calls": msg.tool_calls,
                     "function_call": msg.function_call,
+                    "duration_ms": msg.duration_ms,
                 }
             )
         logger.info(

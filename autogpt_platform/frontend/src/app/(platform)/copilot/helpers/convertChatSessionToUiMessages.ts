@@ -9,6 +9,7 @@ export interface TurnStats {
 export type TurnStatsMap = Map<string, TurnStats>;
 
 interface SessionChatMessage {
+  id: string | null;
   role: string;
   content: string | null;
   tool_call_id: string | null;
@@ -30,6 +31,12 @@ function coerceSessionChatMessages(
       if (!role) return null;
 
       return {
+        id:
+          typeof msg.id === "string"
+            ? msg.id
+            : msg.id == null
+              ? null
+              : String(msg.id),
         role,
         content:
           typeof msg.content === "string"
@@ -321,12 +328,11 @@ export function convertChatSessionMessagesToUiMessages(
       return;
     }
 
-    // Fall back to the loop index when sequence is unexpectedly absent so
-    // multiple sequence-less messages don't collide on the same React key.
     const msgId =
-      msg.sequence != null
+      msg.id ??
+      (msg.sequence != null
         ? `${sessionId}-seq-${msg.sequence}`
-        : `${sessionId}-idx-${idx}`;
+        : `${sessionId}-idx-${idx}`);
     uiMessages.push({
       id: msgId,
       role: uiRole,
