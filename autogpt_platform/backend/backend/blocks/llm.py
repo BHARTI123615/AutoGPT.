@@ -56,6 +56,54 @@ fmt = TextFormatter(autoescape=False)
 # HTTP status codes for user-caused errors that should not be reported to Sentry.
 USER_ERROR_STATUS_CODES = (401, 403, 429)
 
+# HTTP status codes and message patterns that indicate a model ID is unavailable or deprecated.
+_MODEL_UNAVAILABLE_STATUS_CODES = (400, 404)
+_MODEL_UNAVAILABLE_MESSAGE_PATTERNS = (
+    "model not found",
+    "model.*not.*available",
+    "model.*not.*supported",
+    "model.*deprecated",
+    "model.*retired",
+    "no.*such.*model",
+    "invalid.*model",
+    "model.*does not exist",
+    "is not a valid model",
+)
+
+
+def _get_model_error_guidance(error: Exception) -> str | None:
+    """Return a human-readable guidance message if the error indicates an
+    unavailable or deprecated model ID, otherwise None."""
+    is_api_error = isinstance(error, (anthropic.APIStatusError, openai.APIStatusError))
+    status_match = (
+        is_api_error
+        and getattr(error, "status_code", None) in _MODEL_UNAVAILABLE_STATUS_CODES
+    )
+    msg = str(error).lower()
+
+    # Context-length errors are handled by the retry loop — don't interfere.
+    if (
+        "maximum context length" in msg
+        or "token limit" in msg
+        or "context length" in msg
+    ):
+        return None
+
+    # Only trust status codes from providers with well-defined error schemas
+    # (OpenAI, Anthropic). Other providers are matched on message patterns alone.
+    pattern_match = any(
+        re.search(pattern, msg) for pattern in _MODEL_UNAVAILABLE_MESSAGE_PATTERNS
+    )
+
+    if pattern_match and (status_match or not is_api_error):
+        return (
+            "The configured model ID appears to be unavailable or deprecated. "
+            "Please check your provider's current model list and update your "
+            "model configuration to a supported model."
+        )
+    return None
+
+
 LLMProviderName = Literal[
     ProviderName.AIML_API,
     ProviderName.ANTHROPIC,
@@ -1656,28 +1704,31 @@ class AIStructuredResponseGeneratorBlock(AIBlockBase):
                     yield "prompt", self.prompt
                     return
             except Exception as e:
+                msg_lower = str(e).lower()
+                # Context-length errors are retryable — handle before user-error check.
+                if "maximum context length" in msg_lower or "token limit" in msg_lower:
+                    if input_data.max_tokens is None:
+                        input_data.max_tokens = llm_model.max_output_tokens or 4096
+                    input_data.max_tokens = max(1, int(input_data.max_tokens * 0.85))
+                    logger.debug(
+                        f"Reducing max_tokens to {input_data.max_tokens} for next attempt"
+                    )
+                    error_feedback_message = f"Error calling LLM: {e}"
+                    continue
+
                 is_user_error = (
                     isinstance(e, (anthropic.APIStatusError, openai.APIStatusError))
                     and e.status_code in USER_ERROR_STATUS_CODES
                 )
-                if is_user_error:
+                model_guidance = _get_model_error_guidance(e)
+                if is_user_error or model_guidance:
                     logger.warning(f"Error calling LLM: {e}")
                     error_feedback_message = f"Error calling LLM: {e}"
+                    if model_guidance:
+                        error_feedback_message += f"\n\n{model_guidance}"
                     break
                 else:
                     logger.exception(f"Error calling LLM: {e}")
-                if (
-                    "maximum context length" in str(e).lower()
-                    or "token limit" in str(e).lower()
-                ):
-                    if input_data.max_tokens is None:
-                        input_data.max_tokens = llm_model.max_output_tokens or 4096
-                    input_data.max_tokens = int(input_data.max_tokens * 0.85)
-                    logger.debug(
-                        f"Reducing max_tokens to {input_data.max_tokens} for next attempt"
-                    )
-                    # Don't add retry prompt for token limit errors,
-                    # just retry with lower maximum output tokens
 
                 error_feedback_message = f"Error calling LLM: {e}"
 
@@ -1765,15 +1816,13 @@ class AIStructuredResponseGeneratorBlock(AIBlockBase):
             else "Please provide a"
         ) + f" valid JSON {outer_output_type} that matches the expected format."
 
-        return trim_prompt(
-            f"""
+        return trim_prompt(f"""
             |{complaint}
             |
             |{indented_parse_error}
             |
             |{instruction}
-        """
-        )
+        """)
 
     def get_json_from_response(
         self, response_text: str, *, pure_json_mode: bool, output_tag_start: str
@@ -2423,8 +2472,7 @@ class AIListGeneratorBlock(AIBlockBase):
         for item in parsed_list:
             yield "list_item", item
 
-    SYSTEM_PROMPT = trim_prompt(
-        """
+    SYSTEM_PROMPT = trim_prompt("""
         |You are a JSON array generator. Your task is to generate a JSON array of string values based on the user's prompt.
         |
         |The 'list' field should contain a JSON array with the generated string values.
@@ -2434,5 +2482,4 @@ class AIListGeneratorBlock(AIBlockBase):
         |• ["string1", "string2", "string3"]
         |
         |Ensure you provide a proper JSON array with only string values in the 'list' field.
-        """
-    )
+        """)
