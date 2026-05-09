@@ -55,6 +55,7 @@ class ConnectIntegrationTool(BaseTool):
 
     @property
     def description(self) -> str:
+        supported = ", ".join(f"'{p}'" for p in SUPPORTED_PROVIDERS)
         return (
             "Prompt the user to connect a required integration (e.g. GitHub). "
             "Call this ONLY when an external CLI or API call in the sandbox "
@@ -63,9 +64,8 @@ class ConnectIntegrationTool(BaseTool):
             "automatically detects and prompts for the correct provider based "
             "on the agent's graph metadata. Using this tool for agent blocks "
             "risks requesting the WRONG provider. "
-            "The `provider` parameter must be one of the currently supported "
-            "providers (currently only 'github' for GitHub CLI/API). "
-            "Double-check before calling. "
+            f"The `provider` parameter must be one of the currently supported "
+            f"providers ({supported}). Double-check before calling. "
             "The tool surfaces a credentials setup card in the chat so the user "
             "can authenticate without leaving the page. "
             "After the user connects the account, retry the operation. "
