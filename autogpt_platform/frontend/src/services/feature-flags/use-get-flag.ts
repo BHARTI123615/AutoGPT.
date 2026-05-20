@@ -14,6 +14,17 @@ export enum Flag {
   AGENT_BRIEFING = "agent-briefing",
   GENERIC_TRIGGER_AGENTS = "generic-trigger-agents",
   CHAT_SEARCH = "chat-search",
+  // Graphiti memory + dream-system gates. Mirror of the backend
+  // ``Flag`` enum in ``backend/util/feature_flag.py``. Frontend reads
+  // them when memory/dream-related UI surfaces ship (P6+ on the
+  // dream-system roadmap); they default true below so local-dev and
+  // Playwright runs without a LaunchDarkly key exercise the full
+  // memory + dream stack end-to-end.
+  GRAPHITI_MEMORY = "graphiti-memory",
+  GRAPHITI_COMMUNITIES_ENABLED = "graphiti-communities-enabled",
+  DREAM_PASS_ENABLED = "dream-pass-enabled",
+  DREAM_PASS_WEB_FACT_CHECK = "dream-pass-web-fact-check",
+  DREAM_PASS_INVALIDATE_ENTITY = "dream-pass-invalidate-entity",
 }
 
 const isPwMockEnabled = process.env.NEXT_PUBLIC_PW_TEST === "true";
@@ -28,6 +39,11 @@ const defaultFlags = {
   [Flag.AGENT_BRIEFING]: false,
   [Flag.GENERIC_TRIGGER_AGENTS]: false,
   [Flag.CHAT_SEARCH]: false,
+  [Flag.GRAPHITI_MEMORY]: true,
+  [Flag.GRAPHITI_COMMUNITIES_ENABLED]: true,
+  [Flag.DREAM_PASS_ENABLED]: true,
+  [Flag.DREAM_PASS_WEB_FACT_CHECK]: true,
+  [Flag.DREAM_PASS_INVALIDATE_ENTITY]: true,
 };
 
 type FlagValues = typeof defaultFlags;
