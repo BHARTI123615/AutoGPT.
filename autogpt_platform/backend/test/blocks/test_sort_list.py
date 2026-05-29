@@ -16,6 +16,13 @@ async def test_builtin_block_cases():
     await execute_block_test(SortListBlock())
 
 
+def test_error_output_keeps_default_value():
+    error_field = SortListBlock.Output.model_fields["error"]
+
+    assert not error_field.is_required()
+    assert error_field.default == ""
+
+
 async def test_sorts_numbers_naturally():
     outputs = await _collect_outputs({"list": [3, 1, 2]})
 
