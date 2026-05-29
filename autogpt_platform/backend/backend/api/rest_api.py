@@ -20,12 +20,14 @@ import backend.api.features.admin.block_cost_admin_routes
 import backend.api.features.admin.credit_admin_routes
 import backend.api.features.admin.diagnostics_admin_routes
 import backend.api.features.admin.execution_analytics_routes
+import backend.api.features.admin.memory_admin_routes
 import backend.api.features.admin.platform_cost_routes
 import backend.api.features.admin.rate_limit_admin_routes
 import backend.api.features.admin.store_admin_routes
 import backend.api.features.builder
 import backend.api.features.builder.routes
 import backend.api.features.chat.routes as chat_routes
+import backend.api.features.chat.share as chat_share
 import backend.api.features.executions.review.routes
 import backend.api.features.library.db
 import backend.api.features.library.model
@@ -371,6 +373,11 @@ app.include_router(
     prefix="/api",
 )
 app.include_router(
+    backend.api.features.admin.memory_admin_routes.router,
+    tags=["v2", "admin"],
+    prefix="/api",
+)
+app.include_router(
     backend.api.features.executions.review.routes.router,
     tags=["v2", "executions", "review"],
     prefix="/api/review",
@@ -391,6 +398,16 @@ app.include_router(
     chat_routes.router,
     tags=["v2", "chat"],
     prefix="/api/chat",
+)
+app.include_router(
+    chat_share.owner_router,
+    tags=["v2", "chat", "share"],
+    prefix="/api/chat",
+)
+app.include_router(
+    chat_share.public_router,
+    tags=["v2", "chat", "share", "public"],
+    prefix="/api/public/shared/chats",
 )
 app.include_router(
     workspace_routes.router,
