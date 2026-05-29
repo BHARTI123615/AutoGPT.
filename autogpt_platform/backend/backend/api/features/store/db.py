@@ -790,6 +790,7 @@ async def create_store_submission(
     categories: list[str] = [],
     changes_summary: str | None = "Initial Submission",
     recommended_schedule_cron: str | None = None,
+    organization_id: str | None = None,
 ) -> store_model.StoreSubmission:
     """
     Create the first (and only) store listing and thus submission as a normal user
@@ -815,7 +816,21 @@ async def create_store_submission(
         f"graph #{graph_id} v{graph_version}"
     )
 
+    async def verify_org_membership(org_id: str, uid: str) -> None:
+        """Check that user is a member of the specified organization."""
+        member = await prisma.models.OrgMember.prisma().find_first(
+            where={"orgId": org_id, "userId": uid}
+        )
+        if not member:
+            raise PreconditionFailed(
+                "User is not a member of the specified organization"
+            )
+
     try:
+        # Verify org membership when submitting on behalf of an organization
+        if organization_id:
+            await verify_org_membership(organization_id, user_id)
+
         # Sanitize slug to only allow letters and hyphens
         slug = "".join(
             c if c.isalpha() or c == "-" or c.isnumeric() else "" for c in slug
@@ -918,6 +933,11 @@ async def create_store_submission(
                                 "agentGraphId": graph_id,
                                 "OwningUser": {"connect": {"id": user_id}},
                                 "CreatorProfile": {"connect": {"userId": user_id}},
+                                **(
+                                    {"owningOrgId": organization_id}
+                                    if organization_id
+                                    else {}
+                                ),
                             },
                         }
                     },
@@ -967,6 +987,7 @@ async def edit_store_submission(
     changes_summary: str | None = "Update submission",
     recommended_schedule_cron: str | None = None,
     instructions: str | None = None,
+    organization_id: str | None = None,
 ) -> store_model.StoreSubmission:
     """
     Edit an existing store listing submission.
@@ -1005,7 +1026,16 @@ async def edit_store_submission(
             )
 
         # Verify the user owns this listing (submission)
-        if (
+        # When organization_id is provided, check the listing's org ownership
+        if organization_id and current_version.StoreListing:
+            if (
+                not hasattr(current_version.StoreListing, "owningOrgId")
+                or current_version.StoreListing.owningOrgId != organization_id
+            ):
+                raise store_exceptions.UnauthorizedError(
+                    f"Listing does not belong to organization {organization_id}"
+                )
+        elif (
             not current_version.StoreListing
             or current_version.StoreListing.owningUserId != user_id
         ):
@@ -1194,6 +1224,7 @@ async def get_my_agents(
     user_id: str,
     page: int = 1,
     page_size: int = 20,
+    organization_id: str | None = None,
     sort_by: store_model.MyAgentsSortBy = store_model.MyAgentsSortBy.MOST_RECENT,
 ) -> store_model.MyUnpublishedAgentsResponse:
     """Get the agents for the authenticated user"""
