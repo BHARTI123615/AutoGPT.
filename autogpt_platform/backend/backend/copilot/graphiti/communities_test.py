@@ -91,9 +91,9 @@ class TestBoundedLabelPropagation:
         # The warning text must mention the cap. Check caplog.text (the
         # full captured log) because record collection can vary with
         # pytest-logging configuration; the formatted text is reliable.
-        assert f"{MAX_LABEL_PROP_ITERATIONS}-iteration cap" in caplog.text, (
-            f"expected cap-warning in caplog.text; got: {caplog.text!r}"
-        )
+        assert (
+            f"{MAX_LABEL_PROP_ITERATIONS}-iteration cap" in caplog.text
+        ), f"expected cap-warning in caplog.text; got: {caplog.text!r}"
 
 
 class TestUpstreamMonkeyPatch:
@@ -114,7 +114,10 @@ class TestUpstreamMonkeyPatch:
         from graphiti_core.utils.maintenance import community_operations
 
         # Idempotency sentinel on the function itself
-        assert getattr(community_operations.label_propagation, "_autogpt_bounded", False) is True
+        assert (
+            getattr(community_operations.label_propagation, "_autogpt_bounded", False)
+            is True
+        )
 
         # Calling the patch again must be a no-op (must not raise, must
         # not replace with a fresh function lacking the sentinel)
@@ -161,8 +164,12 @@ class TestRebuildCommunitiesForUser:
         # DETACH DELETE → build_communities → summarize flow.
         with (
             patch(
-                "backend.copilot.graphiti.communities.get_graphiti_client",
+                "backend.copilot.graphiti.communities.make_flex_graphiti_client",
                 new=AsyncMock(return_value=client),
+            ),
+            patch(
+                "backend.copilot.graphiti.communities.close_graphiti_client",
+                new=AsyncMock(),
             ),
             patch(
                 "backend.copilot.graphiti.communities._activity_since_last_rebuild",
@@ -195,8 +202,12 @@ class TestRebuildCommunitiesForUser:
 
         with (
             patch(
-                "backend.copilot.graphiti.communities.get_graphiti_client",
+                "backend.copilot.graphiti.communities.make_flex_graphiti_client",
                 new=AsyncMock(return_value=client),
+            ),
+            patch(
+                "backend.copilot.graphiti.communities.close_graphiti_client",
+                new=AsyncMock(),
             ),
             patch(
                 "backend.copilot.graphiti.communities._activity_since_last_rebuild",
@@ -313,8 +324,12 @@ class TestRebuildForUserActivityGate:
 
         with (
             patch(
-                "backend.copilot.graphiti.communities.get_graphiti_client",
+                "backend.copilot.graphiti.communities.make_flex_graphiti_client",
                 new=AsyncMock(return_value=client),
+            ),
+            patch(
+                "backend.copilot.graphiti.communities.close_graphiti_client",
+                new=AsyncMock(),
             ),
             patch(
                 "backend.copilot.graphiti.communities._activity_since_last_rebuild",
@@ -347,8 +362,12 @@ class TestRebuildForUserActivityGate:
 
         with (
             patch(
-                "backend.copilot.graphiti.communities.get_graphiti_client",
+                "backend.copilot.graphiti.communities.make_flex_graphiti_client",
                 new=AsyncMock(return_value=client),
+            ),
+            patch(
+                "backend.copilot.graphiti.communities.close_graphiti_client",
+                new=AsyncMock(),
             ),
             patch(
                 "backend.copilot.graphiti.communities._activity_since_last_rebuild",
@@ -365,3 +384,91 @@ class TestRebuildForUserActivityGate:
         mock_gate.assert_not_called()
         # build_communities WAS called
         client.build_communities.assert_awaited_once()
+
+
+class TestRebuildPathSelection:
+    """Which Graphiti client (flex vs sync) the rebuild actually uses."""
+
+    @pytest.mark.asyncio
+    async def test_uses_flex_client_by_default(self) -> None:
+        driver = AsyncMock()
+        driver.execute_query.return_value = ([], None, None)
+        client = MagicMock()
+        client.graph_driver = driver
+        client.build_communities = AsyncMock(return_value=[])
+
+        flex_factory = AsyncMock(return_value=client)
+        close_mock = AsyncMock()
+        sync_factory = AsyncMock(return_value=client)
+
+        with (
+            patch(
+                "backend.copilot.graphiti.communities.make_flex_graphiti_client",
+                new=flex_factory,
+            ),
+            patch(
+                "backend.copilot.graphiti.communities.close_graphiti_client",
+                new=close_mock,
+            ),
+            patch(
+                "backend.copilot.graphiti.communities.get_graphiti_client",
+                new=sync_factory,
+            ),
+            patch(
+                "backend.copilot.graphiti.communities._activity_since_last_rebuild",
+                new=AsyncMock(return_value=(True, "first_rebuild", {})),
+            ),
+        ):
+            result = await rebuild_communities_for_user(
+                "883cc9da-fe37-4863-839b-acba022bf3ef"
+            )
+
+        assert result["execution_path"] == "flex"
+        flex_factory.assert_awaited_once()
+        sync_factory.assert_not_called()
+        # finally block must release the one-shot driver
+        close_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_uses_sync_client_when_flex_disabled(self) -> None:
+        driver = AsyncMock()
+        driver.execute_query.return_value = ([], None, None)
+        client = MagicMock()
+        client.graph_driver = driver
+        client.build_communities = AsyncMock(return_value=[])
+
+        flex_factory = AsyncMock(return_value=client)
+        close_mock = AsyncMock()
+        sync_factory = AsyncMock(return_value=client)
+
+        with (
+            patch(
+                "backend.copilot.graphiti.communities.graphiti_config.community_rebuild_use_flex_tier",
+                new=False,
+            ),
+            patch(
+                "backend.copilot.graphiti.communities.make_flex_graphiti_client",
+                new=flex_factory,
+            ),
+            patch(
+                "backend.copilot.graphiti.communities.close_graphiti_client",
+                new=close_mock,
+            ),
+            patch(
+                "backend.copilot.graphiti.communities.get_graphiti_client",
+                new=sync_factory,
+            ),
+            patch(
+                "backend.copilot.graphiti.communities._activity_since_last_rebuild",
+                new=AsyncMock(return_value=(True, "first_rebuild", {})),
+            ),
+        ):
+            result = await rebuild_communities_for_user(
+                "883cc9da-fe37-4863-839b-acba022bf3ef"
+            )
+
+        assert result["execution_path"] == "sync"
+        sync_factory.assert_awaited_once()
+        flex_factory.assert_not_called()
+        # No flex client → no close call
+        close_mock.assert_not_awaited()

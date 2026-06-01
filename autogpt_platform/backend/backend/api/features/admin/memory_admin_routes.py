@@ -11,12 +11,25 @@ accepts ``user_id="me"`` and resolves to the caller's user id via
 """
 
 import logging
+import uuid as _uuid
+from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from autogpt_libs.auth import get_user_id, requires_admin_user
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Security
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from backend.copilot.dream.job_status import (
+    JobKind,
+    JobState,
+    JobStatus,
+    read_status,
+    write_initial_status,
+)
+from backend.copilot.dream.nightly_batch import NightlyBatchResult
+from backend.copilot.dream.ratification import RatificationResult
+from backend.copilot.dream.schemas import DreamPassResult
 from backend.copilot.graphiti.client import derive_group_id
 from backend.copilot.graphiti.config import graphiti_config
 from backend.copilot.graphiti.falkordb_driver import AutoGPTFalkorDriver
@@ -134,8 +147,14 @@ class GraphResponse(BaseModel):
     )
 
 
-class RebuildResponse(BaseModel):
-    """Mirror of ``rebuild_communities_for_user``'s return dict."""
+class RebuildResult(BaseModel):
+    """Typed envelope around ``rebuild_communities_for_user``'s return dict.
+
+    Lives here (admin routes) rather than in ``copilot/graphiti/communities.py``
+    because the dict-returning rebuild function predates the admin-API
+    typing pass. Hoisting it to ``communities.py`` (and changing the
+    function signature) is a follow-up cleanup.
+    """
 
     user_id: str
     started_at: str | None = None
@@ -146,6 +165,10 @@ class RebuildResponse(BaseModel):
     skip_reason: str | None = None
     activity: dict[str, Any] | None = None
     forced: bool = False
+    execution_path: str | None = None
+    """``"flex"`` when the rebuild ran on OpenAI's flex service tier,
+    ``"sync"`` for the default. ``None`` when the rebuild was skipped
+    before a client was constructed."""
 
 
 # ---------------------------------------------------------------------------
@@ -164,12 +187,20 @@ def _open_driver(group_id: str) -> AutoGPTFalkorDriver:
     The visualizer's read paths only need Cypher; we avoid the
     ~1s LLM-client + cross-encoder setup cost for what should be
     snappy dashboard calls.
+
+    ``build_indices=False`` suppresses graphiti-core's per-init
+    fire-and-forget indexing task. For a user whose graph the admin
+    is inspecting, the indices are already in place from the
+    long-lived chat-write client; firing the index-creation task per
+    short-lived admin request creates a race with the route's own
+    queries and produces "Buffer is closed" log spam.
     """
     return AutoGPTFalkorDriver(
         host=graphiti_config.falkordb_host,
         port=graphiti_config.falkordb_port,
         password=graphiti_config.falkordb_password or None,
         database=group_id,
+        build_indices=False,
     )
 
 
@@ -211,9 +242,7 @@ async def get_memory_overview(
         mentions = await _count(
             driver, "MATCH ()-[e:MENTIONS]->() RETURN count(e) AS c"
         )
-        communities = await _count(
-            driver, "MATCH (n:Community) RETURN count(n) AS c"
-        )
+        communities = await _count(driver, "MATCH (n:Community) RETURN count(n) AS c")
     finally:
         await driver.close()
 
@@ -242,7 +271,7 @@ async def list_entities(
 
     driver = _open_driver(group_id)
     try:
-        rows, _, _ = await driver.execute_query(
+        result = await driver.execute_query(
             """
             MATCH (n:Entity {group_id: $g})
             RETURN n.uuid AS uuid, n.name AS name, n.summary AS summary
@@ -252,6 +281,7 @@ async def list_entities(
             g=group_id,
             limit=limit,
         )
+        rows = result[0] if result else []
     except Exception:
         rows = []
     finally:
@@ -297,7 +327,7 @@ async def list_facts(
 
     driver = _open_driver(group_id)
     try:
-        rows, _, _ = await driver.execute_query(
+        result = await driver.execute_query(
             f"""
             MATCH (src:Entity)-[e:RELATES_TO]->(tgt:Entity)
             WHERE {where}
@@ -316,6 +346,7 @@ async def list_facts(
             """,
             **params,
         )
+        rows = result[0] if result else []
     except Exception:
         rows = []
     finally:
@@ -353,7 +384,7 @@ async def list_communities(
 
     driver = _open_driver(group_id)
     try:
-        rows, _, _ = await driver.execute_query(
+        result = await driver.execute_query(
             """
             MATCH (c:Community {group_id: $g})
             OPTIONAL MATCH (c)<-[:HAS_MEMBER]-(m:Entity)
@@ -368,6 +399,7 @@ async def list_communities(
             g=group_id,
             limit=limit,
         )
+        rows = result[0] if result else []
     except Exception:
         rows = []
     finally:
@@ -410,13 +442,14 @@ async def get_graph(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    # Build the labels-of-interest filter for the node query
+    # Build the labels-of-interest list for the node queries — one
+    # Cypher per label so the label can travel through the result row
+    # without an extra ``labels(n)`` call per row.
     labels: list[str] = ["Entity"]
     if include_episodes:
         labels.append("Episodic")
     if include_communities:
         labels.append("Community")
-    labels_filter = "|".join(labels)
 
     driver = _open_driver(group_id)
     nodes: list[GraphNode] = []
@@ -427,7 +460,7 @@ async def get_graph(
         # Nodes — one query per label so we can carry the label through
         # without an expensive labels() function call per row.
         for label in labels:
-            rows, _, _ = await driver.execute_query(
+            result = await driver.execute_query(
                 f"""
                 MATCH (n:{label} {{group_id: $g}})
                 RETURN n.uuid AS uuid,
@@ -439,6 +472,7 @@ async def get_graph(
                 g=group_id,
                 limit=node_limit,
             )
+            rows = result[0] if result else []
             for r in rows:
                 # Custom entity types (Person, Organization, etc.) appear
                 # alongside the base "Entity" label. Pick the first
@@ -479,7 +513,7 @@ async def get_graph(
             edge_types.append("MENTIONS")
         edge_label_filter = "|".join(edge_types)
 
-        rows, _, _ = await driver.execute_query(
+        result = await driver.execute_query(
             f"""
             MATCH (src)-[e:{edge_label_filter} {{group_id: $g}}]->(tgt)
             RETURN e.uuid AS uuid,
@@ -495,6 +529,7 @@ async def get_graph(
             g=group_id,
             limit=edge_limit,
         )
+        rows = result[0] if result else []
         for r in rows:
             src = str(r.get("source", ""))
             tgt = str(r.get("target", ""))
@@ -533,41 +568,297 @@ async def get_graph(
     )
 
 
-@router.post("/{user_id}/communities/rebuild", response_model=RebuildResponse)
-async def rebuild_communities(
+class JobTriggerResponse(BaseModel):
+    """202 response from a fire-and-forget admin trigger.
+
+    Frontend captures ``job_id`` and polls ``GET .../{job_id}`` for
+    progress. ``state`` is always ``"queued"`` at this point — the
+    scheduler picks the job up within sub-second and flips it to
+    ``running``.
+    """
+
+    job_id: str
+    user_id: str
+    kind: JobKind
+    state: JobState
+    started_at: datetime
+
+
+# Typed JobStatus envelopes per job kind. Each is a concrete
+# parametrization of ``JobStatus[T]`` from
+# ``backend/copilot/dream/job_status.py`` over the work body's result
+# shape. Declaring them as named subclasses (rather than inline
+# ``JobStatus[DreamPassResult]``) gives FastAPI a clean OpenAPI
+# component name (``DreamJobStatus`` instead of
+# ``JobStatus_DreamPassResult_``).
+
+
+class DreamJobStatus(JobStatus[DreamPassResult]):
+    """JobStatus envelope for ``kind="dream_pass"``."""
+
+
+class NightlyJobStatus(JobStatus[NightlyBatchResult]):
+    """JobStatus envelope for ``kind="nightly"``."""
+
+
+class CommunityRebuildJobStatus(JobStatus[RebuildResult]):
+    """JobStatus envelope for ``kind="rebuild"``."""
+
+
+@router.post(
+    "/{user_id}/dream",
+    response_model=JobTriggerResponse,
+    status_code=202,
+)
+async def trigger_dream_pass(
     user_id: Annotated[str, Path(description="User id or 'me'")],
     caller_id: Annotated[str, Depends(get_user_id)],
-    force: Annotated[
-        bool,
-        Query(description="Bypass the activity gate — rebuilds even on unchanged graph."),
-    ] = False,
-) -> RebuildResponse:
-    """Trigger an immediate community rebuild for the user.
+) -> JSONResponse:
+    """Fire a dream pass and return 202 + job_id immediately.
 
-    Forwards to ``Scheduler.execute_community_rebuild_pass``. The
-    activity gate inside ``rebuild_communities_for_user`` is honoured
-    by default — pass ``?force=true`` to bypass it.
+    Frontend polls ``GET /api/admin/memory/{user_id}/dream/{job_id}``
+    for progress. Runs ONLY the dream pass submitter — for the full
+    nightly fan-out use ``POST /{user_id}/nightly``.
     """
     target = _resolve_user_id(user_id, caller_id)
     try:
-        derive_group_id(target)  # validate before doing the RPC
+        derive_group_id(target)  # validate before kicking off
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    job_id = str(_uuid.uuid4())
+    status = await write_initial_status(
+        kind="dream_pass", job_id=job_id, user_id=target
+    )
+
     try:
-        result = await get_scheduler_client().execute_community_rebuild_pass(
-            user_id=target, force=force
+        await get_scheduler_client().schedule_immediate_dream_pass(
+            user_id=target, job_id=job_id
         )
     except Exception as exc:
         logger.warning(
-            "Admin-triggered community rebuild failed for user %s: %s",
+            "Failed to schedule dream pass %s for user %s: %s",
+            job_id[:12],
             target[:12],
             exc,
         )
         raise HTTPException(
             status_code=500,
-            detail=f"Community rebuild failed: {type(exc).__name__}: {exc}",
+            detail=f"Dream pass scheduling failed: {type(exc).__name__}: {exc}",
         )
 
-    # Normalize to the response model — the scheduler returns a dict.
-    return RebuildResponse(**result)
+    payload = JobTriggerResponse(
+        job_id=status.job_id,
+        user_id=status.user_id,
+        kind=status.kind,
+        state=status.state,
+        started_at=status.started_at,
+    )
+    return JSONResponse(status_code=202, content=payload.model_dump(mode="json"))
+
+
+@router.get(
+    "/{user_id}/dream/{job_id}",
+    response_model=DreamJobStatus,
+)
+async def get_dream_pass_status(
+    user_id: Annotated[str, Path(description="User id or 'me'")],
+    job_id: Annotated[str, Path(description="Job id returned by the POST")],
+    caller_id: Annotated[str, Depends(get_user_id)],
+) -> DreamJobStatus:
+    """Read the current status of a fire-and-forget dream pass job."""
+    target = _resolve_user_id(user_id, caller_id)
+    status = await read_status(kind="dream_pass", job_id=job_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if status.user_id != target:
+        raise HTTPException(status_code=403, detail="job belongs to a different user")
+    return DreamJobStatus.model_validate(status.model_dump())
+
+
+@router.post("/{user_id}/ratification", response_model=RatificationResult)
+async def trigger_ratification_pass(
+    user_id: Annotated[str, Path(description="User id or 'me'")],
+    caller_id: Annotated[str, Depends(get_user_id)],
+) -> RatificationResult:
+    """Trigger an on-demand ratification sweep for the user (in isolation).
+
+    Forwards to ``Scheduler.execute_ratification_pass_now``. Runs ONLY
+    the ratification supersession sweep — does NOT run dream pass or
+    community rebuild. Useful for testing ratification behavior
+    without the full nightly fan-out.
+    """
+    target = _resolve_user_id(user_id, caller_id)
+    try:
+        derive_group_id(target)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    try:
+        result = await get_scheduler_client().execute_ratification_pass_now(
+            user_id=target
+        )
+    except Exception as exc:
+        logger.warning(
+            "Admin-triggered ratification pass failed for user %s: %s",
+            target[:12],
+            exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ratification pass failed: {type(exc).__name__}: {exc}",
+        )
+    return RatificationResult.model_validate(result)
+
+
+@router.post(
+    "/{user_id}/nightly",
+    response_model=JobTriggerResponse,
+    status_code=202,
+)
+async def trigger_nightly_batch(
+    user_id: Annotated[str, Path(description="User id or 'me'")],
+    caller_id: Annotated[str, Depends(get_user_id)],
+) -> JSONResponse:
+    """Fire the full nightly batch fan-out and return 202 + job_id immediately.
+
+    Frontend polls ``GET /api/admin/memory/{user_id}/nightly/{job_id}``
+    for progress. Same composition as the 03:00 cron — every enabled
+    batch-family submitter runs in sequence sharing one ``nightly_id``
+    for cost-log attribution.
+    """
+    target = _resolve_user_id(user_id, caller_id)
+    try:
+        derive_group_id(target)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    job_id = str(_uuid.uuid4())
+    status = await write_initial_status(kind="nightly", job_id=job_id, user_id=target)
+
+    try:
+        await get_scheduler_client().schedule_immediate_nightly_batch(
+            user_id=target, job_id=job_id
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to schedule nightly batch %s for user %s: %s",
+            job_id[:12],
+            target[:12],
+            exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Nightly batch scheduling failed: {type(exc).__name__}: {exc}",
+        )
+
+    payload = JobTriggerResponse(
+        job_id=status.job_id,
+        user_id=status.user_id,
+        kind=status.kind,
+        state=status.state,
+        started_at=status.started_at,
+    )
+    return JSONResponse(status_code=202, content=payload.model_dump(mode="json"))
+
+
+@router.get(
+    "/{user_id}/nightly/{job_id}",
+    response_model=NightlyJobStatus,
+)
+async def get_nightly_batch_status(
+    user_id: Annotated[str, Path(description="User id or 'me'")],
+    job_id: Annotated[str, Path(description="Job id returned by the POST")],
+    caller_id: Annotated[str, Depends(get_user_id)],
+) -> NightlyJobStatus:
+    """Read the current status of a fire-and-forget nightly batch job."""
+    target = _resolve_user_id(user_id, caller_id)
+    status = await read_status(kind="nightly", job_id=job_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if status.user_id != target:
+        raise HTTPException(status_code=403, detail="job belongs to a different user")
+    return NightlyJobStatus.model_validate(status.model_dump())
+
+
+@router.post(
+    "/{user_id}/communities/rebuild",
+    response_model=JobTriggerResponse,
+    status_code=202,
+)
+async def rebuild_communities(
+    user_id: Annotated[str, Path(description="User id or 'me'")],
+    caller_id: Annotated[str, Depends(get_user_id)],
+    force: Annotated[
+        bool,
+        Query(
+            description=(
+                "Reserved — the fire-and-forget wrapper currently always "
+                "honours the activity gate. Kept on the signature so the "
+                "frontend hook doesn't need a contract change when the "
+                "force flag is threaded through to the wrapper."
+            )
+        ),
+    ] = False,
+) -> JSONResponse:
+    """Fire a community rebuild and return 202 + job_id immediately.
+
+    Frontend polls
+    ``GET /api/admin/memory/{user_id}/communities/rebuild/{job_id}``
+    for progress.
+    """
+    _ = force  # not yet plumbed through the with_status wrapper
+    target = _resolve_user_id(user_id, caller_id)
+    try:
+        derive_group_id(target)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    job_id = str(_uuid.uuid4())
+    status = await write_initial_status(kind="rebuild", job_id=job_id, user_id=target)
+
+    try:
+        await get_scheduler_client().schedule_immediate_community_rebuild(
+            user_id=target, job_id=job_id
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to schedule community rebuild %s for user %s: %s",
+            job_id[:12],
+            target[:12],
+            exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Community rebuild scheduling failed: " f"{type(exc).__name__}: {exc}"
+            ),
+        )
+
+    payload = JobTriggerResponse(
+        job_id=status.job_id,
+        user_id=status.user_id,
+        kind=status.kind,
+        state=status.state,
+        started_at=status.started_at,
+    )
+    return JSONResponse(status_code=202, content=payload.model_dump(mode="json"))
+
+
+@router.get(
+    "/{user_id}/communities/rebuild/{job_id}",
+    response_model=CommunityRebuildJobStatus,
+)
+async def get_community_rebuild_status(
+    user_id: Annotated[str, Path(description="User id or 'me'")],
+    job_id: Annotated[str, Path(description="Job id returned by the POST")],
+    caller_id: Annotated[str, Depends(get_user_id)],
+) -> CommunityRebuildJobStatus:
+    """Read the current status of a fire-and-forget community rebuild job."""
+    target = _resolve_user_id(user_id, caller_id)
+    status = await read_status(kind="rebuild", job_id=job_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if status.user_id != target:
+        raise HTTPException(status_code=403, detail="job belongs to a different user")
+    return CommunityRebuildJobStatus.model_validate(status.model_dump())

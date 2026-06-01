@@ -300,6 +300,14 @@ class Config(UpdateTrackingModel["Config"], BaseSettings):
         "service daemon to run on",
     )
 
+    batch_executor_port: int = Field(
+        default=8011,
+        description="The port for the BatchExecutor subprocess to run on. "
+        "The service has no inbound RPC surface today — callers interact via "
+        "the Redis-backed pending queue — but AppService requires every "
+        "subprocess to expose /health_check on a port for supervision.",
+    )
+
     otto_api_url: str = Field(
         default="",
         description="The URL for the Otto API service",
@@ -725,6 +733,17 @@ class Secrets(UpdateTrackingModel["Secrets"], BaseSettings):
         default="",
         description="Discord bot token for the CoPilot chat bridge. When set, "
         "the bridge enables its Discord adapter.",
+    )
+    autopilot_bot_discord_client_id: str = Field(
+        default="",
+        description="Discord application client ID for the CoPilot bot. Used "
+        "to build the 'Add to server' invite URL on the Bots settings page; "
+        "the bot itself doesn't need it.",
+    )
+    autopilot_bot_discord_permissions: str = Field(
+        default="",
+        description="Discord permissions bitfield for the 'Add to server' "
+        "invite URL. Overrides the built-in default when non-empty.",
     )
 
     smtp_server: str = Field(default="", description="SMTP server IP")
