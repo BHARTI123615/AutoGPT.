@@ -7533,7 +7533,7 @@
                 "AGENT_NEW_RUN",
                 "AGENT_INPUT",
                 "CONGRATS",
-                "VISIT_COPILOT",
+                "ONBOARDING_COMPLETE",
                 "BUILDER_OPEN"
               ],
               "type": "string",
@@ -15180,7 +15180,7 @@
           "AGENT_NEW_RUN",
           "AGENT_INPUT",
           "CONGRATS",
-          "VISIT_COPILOT",
+          "ONBOARDING_COMPLETE",
           "GET_RESULTS",
           "MARKETPLACE_VISIT",
           "MARKETPLACE_ADD_AGENT",
@@ -19972,18 +19972,18 @@
         "properties": {
           "userId": { "type": "string", "title": "Userid" },
           "completedSteps": {
-            "items": { "$ref": "#/components/schemas/OnboardingStep" },
+            "items": { "type": "string" },
             "type": "array",
             "title": "Completedsteps"
           },
           "walletShown": { "type": "boolean", "title": "Walletshown" },
           "notified": {
-            "items": { "$ref": "#/components/schemas/OnboardingStep" },
+            "items": { "type": "string" },
             "type": "array",
             "title": "Notified"
           },
           "rewardedFor": {
-            "items": { "$ref": "#/components/schemas/OnboardingStep" },
+            "items": { "type": "string" },
             "type": "array",
             "title": "Rewardedfor"
           },
@@ -20055,10 +20055,7 @@
           },
           "notified": {
             "anyOf": [
-              {
-                "items": { "$ref": "#/components/schemas/OnboardingStep" },
-                "type": "array"
-              },
+              { "items": { "type": "string" }, "type": "array" },
               { "type": "null" }
             ],
             "title": "Notified"
