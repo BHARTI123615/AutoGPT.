@@ -8,7 +8,7 @@ import asyncio
 import concurrent.futures
 import logging
 import os
-import subprocess
+
 import threading
 import time
 
@@ -287,18 +287,19 @@ class CoPilotProcessor:
 
                 cli_path = SubprocessCLITransport._find_bundled_cli(None)  # type: ignore[arg-type]
             if cli_path:
-                result = subprocess.run(
-                    [cli_path, "-v"],
-                    capture_output=True,
-                    timeout=10,
-                )
-                if result.returncode == 0:
-                    logger.info(f"[CoPilotExecutor] CLI pre-warm done: {cli_path}")
-                else:
+                try:
+                    with open(cli_path, "rb") as binary_file:
+                            for _ in iter(lambda: binary_file.read(1024 * 1024), b""):
+                                pass
+                    logger.info(
+                        "[CoPilotExecutor] CLI pre-warm done: %s",
+                        os.path.basename(cli_path),
+                    )
+                except OSError as exc:
                     logger.warning(
-                        "[CoPilotExecutor] CLI pre-warm failed (rc=%d): %s",
-                        result.returncode,  # type: ignore[reportCallIssue]
-                        cli_path,
+                        "[CoPilotExecutor] CLI pre-warm skipped: %s: %s",
+                        os.path.basename(cli_path),
+                        exc,
                     )
         except Exception as e:
             logger.debug(f"[CoPilotExecutor] CLI pre-warm skipped: {e}")
