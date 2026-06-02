@@ -42,21 +42,9 @@ export function useArtifactPanel() {
     setIsSourceView(false);
   }, [activeArtifact?.id]);
 
-  // Keyboard: Escape to close
-  useEffect(() => {
-    if (!artifactPanel.isOpen) return;
-
-    function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        if (document.querySelector('[role="dialog"], [data-state="open"]'))
-          return;
-        closeArtifactPanel();
-      }
-    }
-
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [artifactPanel.isOpen, closeArtifactPanel]);
+  // Escape-to-close is owned by the vaul Drawer.Root in ArtifactPanel — its
+  // onOpenChange already routes to clearArtifactPreview. A manual document
+  // listener here would self-block on the drawer's own [role="dialog"].
 
   // Track viewport width reactively for maximize mode.
   const [viewportWidth, setViewportWidth] = useState(

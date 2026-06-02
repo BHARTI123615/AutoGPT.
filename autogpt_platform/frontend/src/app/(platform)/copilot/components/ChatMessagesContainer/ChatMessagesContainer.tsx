@@ -462,7 +462,7 @@ export function ChatMessagesContainer({
   return (
     <Conversation
       key={sessionID ?? "new"}
-      resize={settled ? "smooth" : "instant"}
+      resize="instant"
       className={
         "min-h-0 flex-1 " +
         (hideForScroll
@@ -471,7 +471,7 @@ export function ChatMessagesContainer({
       }
     >
       <ConversationContent
-        className="flex min-h-full flex-1 flex-col gap-6 px-3 py-6"
+        className="flex min-h-full flex-1 flex-col gap-6 px-6 py-0"
         style={
           bottomContentPadding
             ? { paddingBottom: bottomContentPadding + 24 }
@@ -554,7 +554,11 @@ export function ChatMessagesContainer({
             : null;
 
           return (
-            <Message from={message.role} key={message.id}>
+            <Message
+              from={message.role}
+              key={message.id}
+              data-message-id={message.id}
+            >
               <MessageContent
                 className={
                   "text-[1rem] leading-relaxed " +

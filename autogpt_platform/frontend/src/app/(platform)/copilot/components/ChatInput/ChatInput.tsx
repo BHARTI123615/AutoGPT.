@@ -8,11 +8,17 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { toast } from "@/components/molecules/Toast/use-toast";
 import { InputGroup } from "@/components/ui/input-group";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { Flag, useGetFlag } from "@/services/feature-flags/use-get-flag";
 import { ArrowUpIcon } from "@phosphor-icons/react";
 import { ChangeEvent, useEffect, useState } from "react";
 import { AttachmentMenu } from "./components/AttachmentMenu";
+import { BlockCaret } from "./components/BlockCaret";
 import { DryRunToggleButton } from "./components/DryRunToggleButton";
 import { FileChips } from "./components/FileChips";
 import { ModelToggleButton } from "./components/ModelToggleButton";
@@ -191,6 +197,10 @@ export function ChatInput({
       <InputGroup
         className={cn(
           "overflow-hidden has-[[data-slot=input-group-control]:focus-visible]:border-neutral-200 has-[[data-slot=input-group-control]:focus-visible]:ring-0",
+          // In an active session the input docks into the gray input bar —
+          // no rounding/border/shadow, transparent so the bar bg shows.
+          hasSession &&
+            "!rounded-none !border-0 !bg-transparent pt-2 shadow-none",
           isRecording &&
             "border-red-400 ring-1 ring-red-400 has-[[data-slot=input-group-control]:focus-visible]:border-red-400 has-[[data-slot=input-group-control]:focus-visible]:ring-red-400",
         )}
@@ -209,7 +219,9 @@ export function ChatInput({
             onKeyDown={handleKeyDown}
             disabled={isInputDisabled}
             placeholder={resolvedPlaceholder}
+            className="caret-transparent placeholder:indent-3"
           />
+          <BlockCaret textareaId={inputId} />
           {isRecording && !value && (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
               <RecordingIndicator
@@ -292,7 +304,12 @@ export function ChatInput({
               </PromptInputButton>
             )}
             {isStreaming ? (
-              <PromptInputSubmit status="streaming" onStop={onStop} />
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <PromptInputSubmit status="streaming" onStop={onStop} />
+                </TooltipTrigger>
+                <TooltipContent side="top">Stop</TooltipContent>
+              </Tooltip>
             ) : (
               <PromptInputSubmit disabled={!canSend} />
             )}

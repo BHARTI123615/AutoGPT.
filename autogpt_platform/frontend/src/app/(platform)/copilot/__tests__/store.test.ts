@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ArtifactRef } from "../store";
-import { useCopilotUIStore } from "../store";
+import { DEFAULT_PANEL_WIDTH, useCopilotUIStore } from "../store";
 
 vi.mock("@sentry/nextjs", () => ({
   captureException: vi.fn(),
@@ -31,6 +31,7 @@ function resetStore() {
       width: 600,
       activeArtifact: null,
       history: [],
+      activeTab: "files",
     },
   });
 }
@@ -135,7 +136,7 @@ describe("artifactPanel store actions", () => {
     expect(s.activeArtifact?.id).toBe("bin");
   });
 
-  it("resetArtifactPanel clears active artifact and history", () => {
+  it("resetArtifactPanel clears active artifact and history without touching isOpen", () => {
     const a = makeArtifact("a");
     const b = makeArtifact("b");
     useCopilotUIStore.getState().openArtifact(a);
@@ -145,7 +146,9 @@ describe("artifactPanel store actions", () => {
     useCopilotUIStore.getState().resetArtifactPanel();
 
     const s = useCopilotUIStore.getState().artifactPanel;
-    expect(s.isOpen).toBe(false);
+    // `isOpen` is intentionally left alone — it's shared with ContextPanel
+    // and resetArtifactPanel runs on every session change.
+    expect(s.isOpen).toBe(true);
     expect(s.isMinimized).toBe(false);
     expect(s.isMaximized).toBe(false);
     expect(s.activeArtifact).toBeNull();
@@ -220,7 +223,7 @@ describe("artifactPanel store actions", () => {
     expect(s.isMaximized).toBe(false);
     expect(s.activeArtifact).toBeNull();
     expect(s.history).toEqual([]);
-    expect(s.width).toBe(600); // DEFAULT_PANEL_WIDTH
+    expect(s.width).toBe(DEFAULT_PANEL_WIDTH);
   });
 });
 

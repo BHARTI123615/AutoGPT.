@@ -17,6 +17,7 @@ export enum Flag {
   GENERIC_TRIGGER_AGENTS = "generic-trigger-agents",
   CHAT_SEARCH = "chat-search",
   CHAT_SHARING = "chat-sharing",
+  CONTEXT_PANEL = "chat-context-panel",
 }
 
 const isPwMockEnabled = process.env.NEXT_PUBLIC_PW_TEST === "true";
@@ -33,6 +34,7 @@ const defaultFlags = {
   [Flag.GENERIC_TRIGGER_AGENTS]: false,
   [Flag.CHAT_SEARCH]: false,
   [Flag.CHAT_SHARING]: false,
+  [Flag.CONTEXT_PANEL]: false,
 };
 
 type FlagValues = typeof defaultFlags;
@@ -78,6 +80,8 @@ function readEnvOverride(flag: Flag): string | undefined {
       return process.env.NEXT_PUBLIC_FORCE_FLAG_CHAT_SEARCH;
     case Flag.CHAT_SHARING:
       return process.env.NEXT_PUBLIC_FORCE_FLAG_CHAT_SHARING;
+    case Flag.CONTEXT_PANEL:
+      return process.env.NEXT_PUBLIC_FORCE_FLAG_CONTEXT_PANEL;
   }
 }
 
