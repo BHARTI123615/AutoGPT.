@@ -58,6 +58,42 @@ class GraphitiConfig(BaseSettings):
         description="API key for embedder — empty falls back to CHAT_OPENAI_API_KEY, then OPENAI_API_KEY",
     )
 
+    # Cross-encoder reranker (P-1.4) — used by warm-context retrieval to
+    # rerank top edges from BM25 + cosine + BFS. Graphiti's built-in
+    # OpenAIRerankerClient runs concurrent boolean-classifier prompts
+    # against gpt-4.1-nano by default (one prompt per candidate; log-
+    # probabilities decide the score). The audit estimated ~10–15%
+    # precision lift on warm context at the cost of one LLM call per
+    # session start. Defaults match Graphiti's own default so the
+    # reranker can ship with no env config.
+    reranker_model: str = Field(
+        default="gpt-4.1-nano",
+        description="Model for the cross-encoder reranker. Cheap, fast classifier prompts.",
+    )
+
+    # Activity-gate threshold for community rebuilds (P-1.7).
+    # ``rebuild_communities_for_user`` skips when there have been fewer
+    # than this many new episodes since the last successful rebuild —
+    # avoids paying the per-community LLM-summarization cost AND avoids
+    # clustering drift on essentially-unchanged graphs (LP tie-breaks
+    # are non-deterministic; summary text varies). Defaults to 5 — a
+    # full week of low-activity (~1 episode/day) is fine to skip; a
+    # power user blasting 20+ memories triggers rebuild within hours.
+    community_rebuild_min_new_episodes: int = Field(
+        default=5,
+        description="Skip community rebuild when fewer than this many new episodes since last rebuild.",
+    )
+
+    # Nightly community rebuild is non-interactive scheduled work — ~50%
+    # cheaper on OpenAI's ``service_tier="flex"`` (worst-case ~15min
+    # queue, typically just a few seconds slower). Interactive ingest
+    # stays on sync tier because the user expects deduped facts ready
+    # for their next turn.
+    community_rebuild_use_flex_tier: bool = Field(
+        default=True,
+        description="Run nightly community rebuilds on OpenAI's flex service tier (~50% discount).",
+    )
+
     # Concurrency
     semaphore_limit: int = Field(
         default=5,
@@ -154,6 +190,27 @@ async def is_enabled_for_user(user_id: str | None) -> bool:
 
     return await is_feature_enabled(
         Flag.GRAPHITI_MEMORY,
+        user_id,
+        default=False,
+    )
+
+
+async def is_communities_enabled_for_user(user_id: str | None) -> bool:
+    """Check if per-user community-detection rebuilds are enabled.
+
+    Distinct from ``is_enabled_for_user`` — a user can have Graphiti
+    memory enabled (writes + reads work) without the weekly Leiden
+    rebuild + LLM summarization running on their graph. Gated by
+    ``Flag.GRAPHITI_COMMUNITIES_ENABLED``; defaults False so the cost
+    only lands behind explicit opt-in.
+    """
+    if not user_id:
+        return False
+
+    from backend.util.feature_flag import Flag, is_feature_enabled
+
+    return await is_feature_enabled(
+        Flag.GRAPHITI_COMMUNITIES_ENABLED,
         user_id,
         default=False,
     )

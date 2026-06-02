@@ -17,6 +17,17 @@ export enum Flag {
   GENERIC_TRIGGER_AGENTS = "generic-trigger-agents",
   CHAT_SEARCH = "chat-search",
   CHAT_SHARING = "chat-sharing",
+  // Graphiti memory + dream-system gates. Mirror of the backend
+  // ``Flag`` enum in ``backend/util/feature_flag.py``. Frontend reads
+  // them when memory/dream-related UI surfaces ship (P6+ on the
+  // dream-system roadmap); they default true below so local-dev and
+  // Playwright runs without a LaunchDarkly key exercise the full
+  // memory + dream stack end-to-end.
+  GRAPHITI_MEMORY = "graphiti-memory",
+  GRAPHITI_COMMUNITIES_ENABLED = "graphiti-communities-enabled",
+  DREAM_PASS_ENABLED = "dream-pass-enabled",
+  DREAM_PASS_WEB_FACT_CHECK = "dream-pass-web-fact-check",
+  DREAM_PASS_INVALIDATE_ENTITY = "dream-pass-invalidate-entity",
 }
 
 const isPwMockEnabled = process.env.NEXT_PUBLIC_PW_TEST === "true";
@@ -33,6 +44,11 @@ const defaultFlags = {
   [Flag.GENERIC_TRIGGER_AGENTS]: false,
   [Flag.CHAT_SEARCH]: false,
   [Flag.CHAT_SHARING]: false,
+  [Flag.GRAPHITI_MEMORY]: true,
+  [Flag.GRAPHITI_COMMUNITIES_ENABLED]: true,
+  [Flag.DREAM_PASS_ENABLED]: true,
+  [Flag.DREAM_PASS_WEB_FACT_CHECK]: true,
+  [Flag.DREAM_PASS_INVALIDATE_ENTITY]: true,
 };
 
 type FlagValues = typeof defaultFlags;
@@ -78,6 +94,16 @@ function readEnvOverride(flag: Flag): string | undefined {
       return process.env.NEXT_PUBLIC_FORCE_FLAG_CHAT_SEARCH;
     case Flag.CHAT_SHARING:
       return process.env.NEXT_PUBLIC_FORCE_FLAG_CHAT_SHARING;
+    case Flag.GRAPHITI_MEMORY:
+      return process.env.NEXT_PUBLIC_FORCE_FLAG_GRAPHITI_MEMORY;
+    case Flag.GRAPHITI_COMMUNITIES_ENABLED:
+      return process.env.NEXT_PUBLIC_FORCE_FLAG_GRAPHITI_COMMUNITIES_ENABLED;
+    case Flag.DREAM_PASS_ENABLED:
+      return process.env.NEXT_PUBLIC_FORCE_FLAG_DREAM_PASS_ENABLED;
+    case Flag.DREAM_PASS_WEB_FACT_CHECK:
+      return process.env.NEXT_PUBLIC_FORCE_FLAG_DREAM_PASS_WEB_FACT_CHECK;
+    case Flag.DREAM_PASS_INVALIDATE_ENTITY:
+      return process.env.NEXT_PUBLIC_FORCE_FLAG_DREAM_PASS_INVALIDATE_ENTITY;
   }
 }
 

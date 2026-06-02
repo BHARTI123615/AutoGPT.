@@ -14,6 +14,7 @@ from graphiti_core.nodes import EpisodeType
 
 from .client import derive_group_id, get_graphiti_client
 from .memory_model import MemoryEnvelope, MemoryKind, MemoryStatus, SourceKind
+from .types import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,16 @@ async def _ingestion_worker(user_id: str, queue: asyncio.Queue) -> None:
             try:
                 group_id = derive_group_id(user_id)
                 client = await get_graphiti_client(group_id)
-                await client.add_episode(**payload)
+                # Pass custom entity + edge types so MemoryEnvelope metadata
+                # (status, confidence, source_kind, scope, provenance) lives
+                # on :RELATES_TO edges and not only inside :Episodic.content.
+                # Single point of wire-in for every caller of this worker.
+                await client.add_episode(
+                    **payload,
+                    entity_types=ENTITY_TYPES,
+                    edge_types=EDGE_TYPES,
+                    edge_type_map=EDGE_TYPE_MAP,
+                )
             except Exception:
                 logger.warning(
                     "Graphiti ingestion failed for user %s",
@@ -246,8 +256,17 @@ async def _ensure_worker(user_id: str) -> asyncio.Queue:
     Returns the queue directly so callers don't need to look it up from
     the state dict (which avoids a TOCTOU race if the worker times out
     and cleans up between this call and the put_nowait).
+
+    Also fires the auto-registration of the user's dream-system
+    schedules (community rebuild + dream pass + ratification pass) the
+    first time we see them in this process — lazy on first memory write,
+    per-job flag-gated, per-job idempotent. See
+    ``copilot/dream/scheduling.py:ensure_dream_system_scheduled``.
+    Fire-and-forget; failures are swallowed inside the helper so
+    ingestion is never affected.
     """
     state = _get_loop_state()
+    is_new_user_for_this_process = False
     async with state.workers_lock:
         if user_id not in state.user_queues:
             q: asyncio.Queue = asyncio.Queue(maxsize=100)
@@ -256,7 +275,22 @@ async def _ensure_worker(user_id: str) -> asyncio.Queue:
                 _ingestion_worker(user_id, q),
                 name=f"graphiti-ingest-{user_id[:12]}",
             )
-        return state.user_queues[user_id]
+            is_new_user_for_this_process = True
+        queue = state.user_queues[user_id]
+
+    if is_new_user_for_this_process:
+        # Fire-and-forget; per-job Redis SETNX inside the helper
+        # provides cross-process / cross-restart idempotency. Done
+        # outside the workers_lock so the scheduler RPC can't
+        # deadlock ingestion.
+        from backend.copilot.dream.scheduling import ensure_dream_system_scheduled
+
+        asyncio.create_task(
+            ensure_dream_system_scheduled(user_id),
+            name=f"dream-system-register-{user_id[:12]}",
+        )
+
+    return queue
 
 
 async def _resolve_user_name(user_id: str) -> str:
