@@ -8,7 +8,7 @@ from backend.util.clients import (
     get_database_manager_client,
     get_notification_manager_client,
 )
-from backend.util.metrics import sentry_capture_error
+from backend.util.metrics import DiscordChannel, sentry_capture_error
 from backend.util.settings import Config
 
 logger = logging.getLogger(__name__)
@@ -102,7 +102,37 @@ class LateExecutionMonitor:
         msg = str(error)
 
         sentry_capture_error(error)
-        self.notification_client.discord_system_alert(msg)
+
+        late_execution_types = []
+        if queued_late_executions:
+            late_execution_types.append("queued")
+        if running_late_executions:
+            late_execution_types.append("running")
+
+        correlation_id = (
+            "late_execution_"
+            f"{'_'.join(late_execution_types)}_"
+            f"{self.config.execution_late_notification_threshold_secs}s"
+        )
+
+        # Send both Discord and AllQuiet alerts
+        self.notification_client.system_alert(
+            content=msg,
+            channel=DiscordChannel.PLATFORM,
+            correlation_id=correlation_id,
+            severity="critical",
+            status="open",
+            extra_attributes={
+                "total_late_executions": str(num_total_late),
+                "queued_executions": str(num_queued),
+                "running_executions": str(num_running),
+                "affected_users": str(num_users),
+                "threshold_seconds": str(
+                    self.config.execution_late_notification_threshold_secs
+                ),
+            },
+        )
+
         return msg
 
 

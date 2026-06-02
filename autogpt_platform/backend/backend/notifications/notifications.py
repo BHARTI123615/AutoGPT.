@@ -1,7 +1,8 @@
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Literal
 
 import aio_pika
 from prisma.enums import NotificationType
@@ -32,8 +33,14 @@ from backend.data.user import (
 )
 from backend.notifications.email import EmailSender
 from backend.util.clients import get_database_manager_async_client
+from backend.util.feature_flag import Flag, is_feature_enabled
 from backend.util.logging import TruncatedLogger
-from backend.util.metrics import DiscordChannel, discord_send_alert
+from backend.util.metrics import (
+    AllQuietAlert,
+    DiscordChannel,
+    discord_send_alert,
+    send_allquiet_alert,
+)
 from backend.util.retry import continuous_retry
 from backend.util.service import (
     AppService,
@@ -54,6 +61,26 @@ settings = Settings()
 # truly broken messages on the queue for long.
 MAX_CONSUMER_RETRY_ATTEMPTS = 3
 CONSUMER_RETRY_BACKOFF_SECONDS = 2
+
+
+_EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001f300-\U0001f9ff"
+    "\U00002702-\U000027b0"
+    "\U0000fe00-\U0000fe0f"
+    "\U0000200d"
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def _extract_clean_title(content: str, max_length: int = 100) -> str:
+    """Extract the first line and strip Discord markdown / emoji."""
+    lines = content.split("\n")
+    title = lines[0] if lines else content[:max_length]
+    title = title.replace("**", "")
+    title = _EMOJI_PATTERN.sub("", title).strip()
+    return title[:max_length]
 
 
 NOTIFICATION_EXCHANGE = Exchange(name="notifications", type=ExchangeType.TOPIC)
@@ -439,6 +466,49 @@ class NotificationManager(AppService):
             await discord_send_alert(content, channel)
         except Exception as e:
             logger.warning(f"Failed to send Discord system alert: {e}")
+
+    @expose
+    async def allquiet_system_alert(self, alert: AllQuietAlert):
+        await send_allquiet_alert(alert)
+
+    @expose
+    async def system_alert(
+        self,
+        content: str,
+        channel: DiscordChannel = DiscordChannel.PLATFORM,
+        correlation_id: str | None = None,
+        severity: Literal["warning", "critical", "minor"] = "warning",
+        status: Literal["resolved", "open"] = "open",
+        extra_attributes: dict[str, str] | None = None,
+    ):
+        """Send both Discord and AllQuiet alerts for system events."""
+        discord_error: Exception | None = None
+        try:
+            await discord_send_alert(content, channel)
+        except Exception as e:
+            discord_error = e
+            logger.error(f"Failed to send Discord alert: {e}")
+
+        if correlation_id and await is_feature_enabled(
+            Flag.ALLQUIET_ALERTS, "system", default=True
+        ):
+            title = _extract_clean_title(content)
+            alert = AllQuietAlert(
+                severity=severity,
+                status=status,
+                title=title,
+                description=content,
+                correlation_id=correlation_id,
+                channel=channel.value,
+                extra_attributes=extra_attributes or {},
+            )
+            try:
+                await send_allquiet_alert(alert)
+            except Exception as e:
+                logger.error(f"Failed to send AllQuiet alert: {e}")
+
+        if discord_error:
+            raise discord_error
 
     async def _queue_scheduled_notification(self, event: SummaryParamsEventModel):
         """Queue a scheduled notification - exposed method for other services to call"""
@@ -1189,3 +1259,5 @@ class NotificationManagerClient(AppServiceClient):
     )
     queue_weekly_summary = endpoint_to_sync(NotificationManager.queue_weekly_summary)
     discord_system_alert = endpoint_to_sync(NotificationManager.discord_system_alert)
+    allquiet_system_alert = endpoint_to_sync(NotificationManager.allquiet_system_alert)
+    system_alert = endpoint_to_sync(NotificationManager.system_alert)

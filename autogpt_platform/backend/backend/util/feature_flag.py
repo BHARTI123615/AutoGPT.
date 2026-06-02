@@ -63,6 +63,7 @@ class Flag(str, Enum):
     COPILOT_TIER_WORKSPACE_STORAGE_LIMITS = "copilot-tier-workspace-storage-limits"
     COPILOT_TIER_STRIPE_PRICES = "copilot-tier-stripe-prices"
     GRAPHITI_MEMORY = "graphiti-memory"
+    ALLQUIET_ALERTS = "allquiet-alerts"
     GENERIC_TRIGGER_AGENTS = "generic-trigger-agents"
     # Stripe Product ID for top-up Checkout sessions. When unset (default),
     # top_up_intent uses inline product_data (creates ephemeral Stripe products

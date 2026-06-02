@@ -805,6 +805,7 @@ class Secrets(UpdateTrackingModel["Secrets"], BaseSettings):
         description="The LaunchDarkly SDK key for feature flag management",
     )
 
+    allquiet_webhook_url: str = Field(default="", description="AllQuiet webhook URL")
     agentmail_api_key: str = Field(default="", description="AgentMail API Key")
 
     ayrshare_api_key: str = Field(default="", description="Ayrshare API Key")
