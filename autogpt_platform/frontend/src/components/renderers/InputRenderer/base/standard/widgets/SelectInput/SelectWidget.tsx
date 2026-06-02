@@ -28,7 +28,22 @@ export function SelectWidget(props: WidgetProps) {
     id,
     formContext,
   } = props;
-  const enumOptions = options.enumOptions || [];
+  const rawEnumOptions = options.enumOptions || [];
+  const enumOptions = rawEnumOptions.filter(
+    (option: any) => option.value !== "",
+  );
+  if (
+    process.env.NODE_ENV === "development" &&
+    enumOptions.length !== rawEnumOptions.length
+  ) {
+    console.warn(
+      "[SelectWidget] Dropped enum option(s) with empty-string value — Radix Select.Item disallows empty values and they cannot be selected.",
+      {
+        schema: props.schema,
+        dropped: rawEnumOptions.length - enumOptions.length,
+      },
+    );
+  }
   const type = mapJsonSchemaTypeToInputType(props.schema);
   const { size = "small" } = formContext || {};
   const selectedIndexes = enumOptionsIndexForValue(
