@@ -563,7 +563,12 @@ class TestGenerateActivityStatusForExecution:
             assert entry.graph_exec_id == "test_exec"
             assert entry.graph_id == "test_graph"
             assert entry.block_name == "activity_status_generator"
-            assert entry.provider == "open_router"
+            # ``provider`` is threaded from ``chat_cfg.transport.cost_log_provider``
+            # so the row reflects the backend that actually billed the call.
+            # The test runs against whichever transport the ambient env
+            # resolves to (``CHAT_USE_LOCAL`` / ``OPEN_ROUTER_API_KEY`` /
+            # ``ANTHROPIC_API_KEY``), so accept every transport's label.
+            assert entry.provider in {"anthropic", "open_router", "ollama"}
             assert entry.model == "openai/gpt-4o-mini"
             assert entry.tracking_type == "cost_usd"
             assert entry.tracking_amount == pytest.approx(0.0042)

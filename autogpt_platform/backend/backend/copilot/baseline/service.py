@@ -784,16 +784,37 @@ async def _baseline_llm_caller(
             final_messages = messages
             extra_headers = None
         typed_messages = cast(list[ChatCompletionMessageParam], final_messages)
-        # OR-only: Anthropic's compat endpoint 400s on usage.include + reasoning; use native thinking param in direct mode.
-        if config.openrouter_active:
-            extra_body: dict[str, Any] = dict(_OPENROUTER_INCLUDE_USAGE_COST)
+        # The wire format must match the endpoint ``main_client_credentials``
+        # actually dialed — ``baseline_provider`` is the shared truth for both
+        # (local → openrouter_active → anthropic). Keying on
+        # ``transport.name == "openrouter"`` would send direct-Anthropic shape
+        # to an OpenRouter endpoint in subscription mode with OR creds present,
+        # where ``transport.name`` is ``"subscription"`` but the baseline client
+        # still routes to OpenRouter.
+        baseline_provider = config.baseline_provider
+        is_openrouter_transport = baseline_provider == "openrouter"
+        extra_body: dict[str, Any] = {}
+        if baseline_provider == "local":
+            # Ollama's OpenAI shim defaults to ``num_ctx=4096`` regardless of
+            # the model's advertised window — silently truncating AutoPilot's
+            # ~8 k system prompt and producing nonsense responses on the very
+            # first turn (ollama/ollama#2714). Pass an explicit ctx large
+            # enough to hold our system prompt + a real conversation. Skip
+            # the OpenRouter ``usage.include`` extension and reasoning params
+            # — stricter local backends reject unknown body keys outright.
+            extra_body.setdefault("options", {}).setdefault(
+                "num_ctx", config.local_num_ctx
+            )
+        elif is_openrouter_transport:
+            # OR-only: Anthropic's compat endpoint 400s on usage.include + reasoning.
+            extra_body.update(dict(_OPENROUTER_INCLUDE_USAGE_COST))
             reasoning_param = reasoning_extra_body(
                 state.model, config.claude_agent_max_thinking_tokens
             )
             if reasoning_param:
                 extra_body.update(reasoning_param)
         else:
-            extra_body = {}
+            # Direct mode (non-OR, non-local): use native Anthropic thinking param.
             thinking_param = anthropic_thinking_extra_body(
                 state.model, config.claude_agent_max_thinking_tokens
             )
@@ -806,10 +827,10 @@ async def _baseline_llm_caller(
             "extra_body": extra_body,
         }
         # OR-only: Anthropic's compat endpoint 400s on stream_options; OR embeds cost via it.
-        if config.openrouter_active:
+        if is_openrouter_transport:
             create_kwargs["stream_options"] = {"include_usage": True}
         # Direct: Anthropic requires max_tokens > budget_tokens explicitly; OR injects a default.
-        if not config.openrouter_active and "thinking" in extra_body:
+        if not is_openrouter_transport and "thinking" in extra_body:
             model_max = get_max_output_tokens(state.model)
             budget = min(config.claude_agent_max_thinking_tokens, model_max - 1)
             extra_body["thinking"]["budget_tokens"] = budget
@@ -837,7 +858,16 @@ async def _baseline_llm_caller(
                             _extract_cache_creation_tokens(ptd)
                         )
                     cost = _extract_usage_cost(chunk.usage)
-                    direct_mode = not config.openrouter_active
+                    # Rate-card recovery covers direct-Anthropic mode —
+                    # Anthropic's OpenAI-compat endpoint doesn't emit OR's
+                    # ``usage.cost`` extension, so the rate card is what
+                    # produces a cost number on that path. Local
+                    # (Ollama/vLLM) transports also lack ``usage.cost`` but
+                    # ``compute_anthropic_cost_usd`` returns None for any
+                    # non-Anthropic slug, so the recovery is a no-op for
+                    # local — skip it explicitly so the intent is clear and
+                    # we don't burn a rate-card lookup per usage chunk.
+                    direct_mode = baseline_provider == "anthropic"
                     if cost is None and direct_mode:
                         # Direct mode: no usage.cost field (OR extension); compute from rate card.
                         ptd = chunk.usage.prompt_tokens_details
@@ -2327,9 +2357,17 @@ async def stream_chat_completion_baseline(
                 state.turn_prompt_tokens,
                 state.turn_completion_tokens,
             )
-        # Safety net: recover cost from rate card if usage chunk was dropped (truncated SSE).
-        # OR mode skips recovery — OR's markup differs from raw Anthropic pricing.
-        if state.cost_usd is None and not config.openrouter_active:
+        # Safety net: recover cost from rate card if usage chunk was dropped
+        # (truncated SSE). OR mode skips recovery — OR's markup differs from
+        # raw Anthropic pricing. Local Ollama/vLLM never emit ``usage.cost``
+        # *and* have no rate card to recover from (``compute_anthropic_cost_usd``
+        # returns None for any non-Anthropic slug), so cost stays None for
+        # the whole turn — fine, since local deployments are self-hosted and
+        # ``persist_and_record_usage`` no-ops the cost-credit charge when
+        # ``cost_usd`` is None. Skip the rate-card call explicitly under
+        # local transport so the intent is clear.
+        baseline_provider = config.baseline_provider
+        if state.cost_usd is None and baseline_provider == "anthropic":
             recovered = compute_anthropic_cost_usd(
                 model=active_model,
                 prompt_tokens=state.turn_prompt_tokens,
@@ -2358,7 +2396,11 @@ async def stream_chat_completion_baseline(
             log_prefix="[Baseline]",
             cost_usd=state.cost_usd,
             model=active_model,
-            provider="open_router" if config.openrouter_active else "anthropic",
+            provider=(
+                "open_router"
+                if baseline_provider == "openrouter"
+                else config.transport.cost_log_provider
+            ),
         )
 
         # Persist structured tool-call history (assistant + tool messages)

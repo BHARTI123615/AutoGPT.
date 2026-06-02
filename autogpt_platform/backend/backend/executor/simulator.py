@@ -82,9 +82,13 @@ _OPENROUTER_INCLUDE_USAGE_COST: dict[str, Any] = {"usage": {"include": True}}
 
 def _simulator_model() -> str:
     try:
-        from backend.copilot.config import ChatConfig  # noqa: PLC0415
+        # Reuse the module-level ChatConfig singleton from copilot.sdk.env
+        # rather than constructing a fresh one — the validator chain runs
+        # at import time, so a per-call ``ChatConfig()`` re-reads ``.env``
+        # and re-runs every model_validator on every dry-run turn.
+        from backend.copilot.sdk.env import config as chat_cfg  # noqa: PLC0415
 
-        return ChatConfig().simulation_model or _DEFAULT_SIMULATOR_MODEL
+        return chat_cfg.simulation_model or _DEFAULT_SIMULATOR_MODEL
     except Exception:
         return _DEFAULT_SIMULATOR_MODEL
 
@@ -154,9 +158,36 @@ async def _call_llm_for_simulation(
     client = get_openai_client(prefer_openrouter=True)
     if client is None:
         raise RuntimeError(
-            "[SIMULATOR ERROR — NOT A BLOCK FAILURE] No LLM client available "
-            "(missing OpenAI/OpenRouter API key)."
+            "[SIMULATOR ERROR — NOT A BLOCK FAILURE] No LLM client available. "
+            "Set OPEN_ROUTER_API_KEY (cloud) or CHAT_USE_LOCAL=true with "
+            "CHAT_BASE_URL + CHAT_API_KEY (local). See "
+            "docs/platform/copilot-local-llm.md."
         )
+
+    # ``_OPENROUTER_INCLUDE_USAGE_COST`` is OpenRouter-specific
+    # (``{"usage": {"include": True}}``). Cloud OpenAI ignores unknown
+    # body keys; stricter local OpenAI-compat backends (LiteLLM proxy
+    # with strict mode, some vLLM configs) reject them. Mirror the
+    # ``baseline/service.py`` policy: only send when actually routing
+    # through OpenRouter.
+    #
+    # Under local, swap to the same Ollama ``options.num_ctx`` forward
+    # ``baseline/service.py`` uses (Ollama's OpenAI shim defaults to a
+    # 4 k context regardless of the model's real window; without this
+    # hint the simulator silently truncates anything long enough to
+    # matter — see ollama/ollama#2714). Non-Ollama OpenAI-compat
+    # backends ignore unknown ``options`` keys, so this stays safe.
+    from backend.copilot.sdk.env import config as chat_cfg
+
+    if chat_cfg.transport.name == "local":
+        extra_body: dict[str, Any] = {"options": {"num_ctx": chat_cfg.local_num_ctx}}
+    else:
+        # Shallow-copy the constant rather than sharing the reference — see
+        # the matching pattern in ``baseline/service.py`` and
+        # ``activity_status_generator.py``. Defends against intermediate
+        # layers ever mutating ``extra_body`` and corrupting the shared
+        # module-level dict for every future call.
+        extra_body = dict(_OPENROUTER_INCLUDE_USAGE_COST)
 
     model = _simulator_model()
     last_error: Exception | None = None
@@ -170,7 +201,7 @@ async def _call_llm_for_simulation(
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                extra_body=_OPENROUTER_INCLUDE_USAGE_COST,
+                extra_body=extra_body,
             )
             if not response.choices:
                 raise ValueError("LLM returned empty choices array")
@@ -193,7 +224,12 @@ async def _call_llm_for_simulation(
                     "simulate(%s): attempt=%d usage unavailable", label, attempt + 1
                 )
 
-            await _track_simulator_cost(usage=usage, user_id=user_id, model=model)
+            await _track_simulator_cost(
+                usage=usage,
+                user_id=user_id,
+                model=model,
+                provider=chat_cfg.transport.cost_log_provider,
+            )
             return parsed
 
         except (json.JSONDecodeError, ValueError) as e:
@@ -256,6 +292,7 @@ async def _track_simulator_cost(
     usage: CompletionUsage | None,
     user_id: str | None,
     model: str,
+    provider: str,
 ) -> None:
     """Record platform cost for a single simulator LLM call.
 
@@ -277,7 +314,7 @@ async def _track_simulator_cost(
             log_prefix="[simulator]",
             cost_usd=cost_usd,
             model=model,
-            provider="open_router",
+            provider=provider,
         )
     except Exception as exc:
         logger.warning("[simulator] usage tracking failed: %s", exc)
