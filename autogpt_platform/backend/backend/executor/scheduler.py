@@ -29,6 +29,10 @@ from sqlalchemy import MetaData, create_engine
 
 from backend.copilot.active_turns import ConcurrentTurnLimitError
 from backend.copilot.executor.utils import schedule_turn
+from backend.copilot.graphiti.communities import (
+    CommunityRebuildEnqueueResult,
+    rebuild_communities_for_user,
+)
 from backend.copilot.model import create_chat_session, get_chat_session
 from backend.copilot.optimize_blocks import optimize_block_descriptions
 from backend.data.execution import GraphExecutionWithNodes
@@ -415,6 +419,37 @@ def cleanup_expired_files():
     """Clean up expired files from cloud storage."""
     # Wait for completion
     run_async(cleanup_expired_files_async())
+
+
+def execute_community_rebuild(user_id: str):
+    """Per-user Graphiti community rebuild (P-1.7).
+
+    Sync wrapper around the async ``rebuild_communities_for_user`` so it
+    can run on the APScheduler thread pool. Re-checks the LD flag at
+    execution time so flipping it off after registration actually stops
+    future runs — the cron entry is persisted in SQLAlchemyJobStore
+    across restarts, so the registration-time gate alone is insufficient.
+    """
+    from backend.copilot.graphiti.config import is_communities_enabled_for_user
+
+    if not run_async(is_communities_enabled_for_user(user_id)):
+        logger.info(
+            f"Community rebuild skipped for user {user_id[:12]} — "
+            f"GRAPHITI_COMMUNITIES_ENABLED flag is off."
+        )
+        return
+
+    result = run_async(rebuild_communities_for_user(user_id))
+    if result.error:
+        logger.warning(
+            f"Community rebuild errored for user {user_id[:12]}: {result.error}"
+        )
+    else:
+        logger.info(
+            f"Community rebuild completed for user {user_id[:12]} in "
+            f"{result.elapsed_seconds or 0.0:.1f}s: "
+            f"{result.communities_built}"
+        )
 
 
 def cleanup_oauth_tokens():
@@ -1342,6 +1377,131 @@ class Scheduler(AppService):
         """Manually trigger embedding backfill for approved store agents."""
         return ensure_embeddings_coverage()
 
+    # --- Graphiti community detection (P-1.7) ---
+    #
+    # Communities are off-by-default behind LD flag ``GRAPHITI_COMMUNITIES_ENABLED``
+    # at the call sites. The scheduler unconditionally accepts the
+    # registration call; callers gate on the flag. Rebuilds run weekly at
+    # user-local 04:00 Sunday to avoid the Leiden cost spike during active
+    # hours (and to stagger from a future per-user dream pass at 03:00).
+
+    @expose
+    def add_community_rebuild_schedule(
+        self,
+        user_id: str,
+        user_timezone: str = "UTC",
+    ) -> dict:
+        """Register a weekly community rebuild for one user.
+
+        Gated by ``Flag.GRAPHITI_COMMUNITIES_ENABLED`` per-user. When the
+        flag is off the call is a no-op — returns a structured "skipped"
+        dict so callers see the same shape as a successful registration.
+        """
+        from backend.copilot.graphiti.config import is_communities_enabled_for_user
+
+        if not run_async(is_communities_enabled_for_user(user_id)):
+            logger.info(
+                f"Community rebuild registration skipped for user {user_id[:12]} — "
+                f"GRAPHITI_COMMUNITIES_ENABLED flag is off."
+            )
+            return {
+                "id": None,
+                "user_id": user_id,
+                "user_timezone": user_timezone,
+                "next_run_time": None,
+                "skipped": True,
+                "reason": "graphiti_communities_disabled",
+            }
+
+        if not user_timezone:
+            user_timezone = "UTC"
+
+        job_id = f"community_rebuild_{user_id}"
+        job = self.scheduler.add_job(
+            execute_community_rebuild,
+            kwargs={"user_id": user_id},
+            trigger=CronTrigger.from_crontab("0 4 * * 0", timezone=user_timezone),
+            id=job_id,
+            name=f"Graphiti community rebuild for {user_id[:12]}",
+            jobstore=Jobstores.EXECUTION.value,
+            replace_existing=True,
+            max_instances=1,
+        )
+        logger.info(
+            f"Registered community rebuild job {job.id} for user "
+            f"{user_id[:12]} in tz {user_timezone}"
+        )
+        return {
+            "id": job.id,
+            "user_id": user_id,
+            "user_timezone": user_timezone,
+            "next_run_time": (
+                job.next_run_time.isoformat() if job.next_run_time else None
+            ),
+        }
+
+    @expose
+    def delete_community_rebuild_schedule(self, user_id: str) -> bool:
+        """Remove the weekly community rebuild for one user."""
+        job_id = f"community_rebuild_{user_id}"
+        job = self.scheduler.get_job(job_id, jobstore=Jobstores.EXECUTION.value)
+        if not job:
+            return False
+        job.remove()
+        logger.info(f"Removed community rebuild job for user {user_id[:12]}")
+        return True
+
+    @expose
+    def execute_community_rebuild_pass(
+        self, user_id: str
+    ) -> CommunityRebuildEnqueueResult:
+        """Manually enqueue a community rebuild for one user (bypasses cron).
+
+        Gated by ``Flag.GRAPHITI_COMMUNITIES_ENABLED`` per-user — same
+        guard as ``add_community_rebuild_schedule`` so the manual trigger
+        cannot bypass the LD flag and incur Leiden + LLM cost on users
+        the flag was explicitly off for.
+
+        Returns immediately after enqueuing a one-shot job. Running the
+        full Leiden + LLM-summarization pass inline on the @expose call
+        would block an APScheduler thread for minutes and wedge other
+        scheduled jobs sharing the same small pool. ``max_instances=1``
+        means a manual trigger queued behind the cron rebuild for the
+        same user is dropped — APScheduler will skip the redundant run
+        with ``EVENT_JOB_MAX_INSTANCES``, which is the intended behavior.
+        """
+        from backend.copilot.graphiti.config import is_communities_enabled_for_user
+
+        if not run_async(is_communities_enabled_for_user(user_id)):
+            logger.info(
+                f"Manual community rebuild skipped for user {user_id[:12]} — "
+                f"GRAPHITI_COMMUNITIES_ENABLED flag is off."
+            )
+            return CommunityRebuildEnqueueResult(
+                user_id=user_id,
+                skipped=True,
+                skipped_reason="graphiti_communities_disabled",
+            )
+
+        job_id = f"community_rebuild_manual_{user_id}_{uuid.uuid4().hex[:8]}"
+        job = self.scheduler.add_job(
+            execute_community_rebuild,
+            kwargs={"user_id": user_id},
+            trigger=DateTrigger(run_date=datetime.now(timezone.utc)),
+            id=job_id,
+            name=f"Manual Graphiti community rebuild for {user_id[:12]}",
+            jobstore=Jobstores.EXECUTION.value,
+            max_instances=1,
+        )
+        logger.info(
+            f"Enqueued manual community rebuild job {job.id} for user {user_id[:12]}"
+        )
+        return CommunityRebuildEnqueueResult(
+            user_id=user_id,
+            job_id=job.id,
+            queued=True,
+        )
+
 
 class SchedulerClient(AppServiceClient):
     @classmethod
@@ -1357,3 +1517,13 @@ class SchedulerClient(AppServiceClient):
     )
     # Polymorphic list — preferred for new callers; returns both kinds.
     get_execution_schedules = endpoint_to_async(Scheduler.get_execution_schedules)
+
+    add_community_rebuild_schedule = endpoint_to_async(
+        Scheduler.add_community_rebuild_schedule
+    )
+    delete_community_rebuild_schedule = endpoint_to_async(
+        Scheduler.delete_community_rebuild_schedule
+    )
+    execute_community_rebuild_pass = endpoint_to_async(
+        Scheduler.execute_community_rebuild_pass
+    )
