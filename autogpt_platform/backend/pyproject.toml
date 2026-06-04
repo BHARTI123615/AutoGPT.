@@ -100,7 +100,7 @@ langsmith = "^0.7.7"
 openpyxl = "^3.1.5"
 pymssql = "^2.3.2"
 pymysql = "^1.1.1"
-pyarrow = "^23.0.0"
+pyarrow = ">=23,<25"
 sqlparse = "^0.5.5"
 
 [tool.poetry.group.dev.dependencies]
